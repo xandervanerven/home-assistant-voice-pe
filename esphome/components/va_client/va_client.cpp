@@ -81,6 +81,18 @@ void VaClient::loop() {
              (unsigned) this->audio_fill_);
     dbg_last = now;
   }
+  // If a follow-up window was deferred while audio was draining, schedule
+  // it to open AFTER the downstream buffers (resampler ring + mixer ring +
+  // i2s_audio_speaker 500ms ring) finish playing. Just because our PSRAM
+  // queue is empty doesn't mean the user has heard the audio yet —
+  // opening the mic too early lets it pick up the device's own tail, and
+  // the server VAD interprets it as user speech.
+  if (this->followup_pending_ && this->audio_fill_ == 0) {
+    this->followup_pending_ = false;
+    this->set_timeout("va_followup_open", kFollowupOpenDelayMs, [this]() {
+      this->open_followup_window_();
+    });
+  }
 }
 
 void VaClient::connect_() {
@@ -312,21 +324,22 @@ void VaClient::set_phase_(const std::string &phase) {
       this->streaming_ = false;
     }
     this->cancel_timeout("va_followup");
+    this->cancel_timeout("va_followup_open");
+    this->followup_pending_ = false;
   } else if (phase == "idle") {
-    // Open a follow-up window: AI may have asked a question. Mic stays on
-    // for kFollowupMs; if the user speaks, the next "listening" cancels
-    // the timer. Otherwise we close the session.
-    if (!this->streaming_) {
-      ESP_LOGI(TAG, "phase=idle — follow-up window open (mic on for %u ms)",
-               (unsigned) kFollowupMs);
-      this->streaming_ = true;
+    // Follow-up window: AI may have asked a question. BUT we can't enable
+    // the mic right away — phase=idle fires when the server is done
+    // generating, while we may still have several seconds of TTS audio
+    // queued in PSRAM. Opening the mic mid-playback means it picks up the
+    // speaker. Mark a "pending" flag; loop() opens the actual window once
+    // audio_fill_ drains to zero.
+    if (this->audio_fill_ == 0) {
+      this->open_followup_window_();
+    } else {
+      ESP_LOGI(TAG, "phase=idle but %u bytes still queued; follow-up deferred",
+               (unsigned) this->audio_fill_);
+      this->followup_pending_ = true;
     }
-    this->set_timeout("va_followup", kFollowupMs, [this]() {
-      if (this->streaming_) {
-        ESP_LOGI(TAG, "follow-up window expired — mic streaming off");
-        this->streaming_ = false;
-      }
-    });
   }
 
   // set_phase_ may be called from the websocket task; ESPHome triggers and
@@ -352,9 +365,22 @@ void VaClient::start_session() {
   // room — wake word would be cosmetic.
   ESP_LOGI(TAG, "start_session() — streaming on");
   this->streaming_ = true;
-  // If a follow-up window was open from the previous turn, drop it: the new
-  // wake word starts a fresh session.
+  // New wake word starts a fresh session — drop any pending or active
+  // follow-up window from the previous turn.
+  this->followup_pending_ = false;
   this->cancel_timeout("va_followup");
+  this->cancel_timeout("va_followup_open");
+}
+
+void VaClient::open_followup_window_() {
+  ESP_LOGI(TAG, "follow-up window open (mic on for %u ms)", (unsigned) kFollowupMs);
+  this->streaming_ = true;
+  this->set_timeout("va_followup", kFollowupMs, [this]() {
+    if (this->streaming_) {
+      ESP_LOGI(TAG, "follow-up window expired — mic streaming off");
+      this->streaming_ = false;
+    }
+  });
 }
 
 void VaClient::send_interrupt() {

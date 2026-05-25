@@ -42,6 +42,7 @@ class VaClient : public Component {
   void handle_text_(const char *data, size_t len);
   void handle_binary_(const uint8_t *data, size_t len);
   void set_phase_(const std::string &phase);
+  void open_followup_window_();
 
   std::string url_;
   std::string token_;
@@ -72,7 +73,16 @@ class VaClient : public Component {
   //   - between wake-word start_session() and "listening"/"thinking"
   //   - and again after "idle" for kFollowupMs (in case AI asked a question)
   bool streaming_{false};
+  // Set on phase=idle when there's still TTS audio queued — we can't open
+  // the mic until the speaker drains, otherwise it picks up its own output.
+  // loop() flips this to a live followup window once audio_fill_ hits 0.
+  bool followup_pending_{false};
   static constexpr uint32_t kFollowupMs = 5000;
+  // After our PSRAM queue drains there's still ~500–700 ms in the
+  // downstream chain (resampler + mixer + i2s_audio buffer_duration). Wait
+  // that long before opening the mic so it doesn't pick up the tail of
+  // our own TTS and re-trigger the server VAD.
+  static constexpr uint32_t kFollowupOpenDelayMs = 800;
 
   // Tracks the opcode of the in-flight WS message so we can route
   // continuation frames (op_code = 0) to the same handler.
