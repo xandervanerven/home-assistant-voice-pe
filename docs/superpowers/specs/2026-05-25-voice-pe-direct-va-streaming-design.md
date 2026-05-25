@@ -4,6 +4,25 @@
 **Date:** 2026-05-25
 **Affects:** `home-assistant-voice-pe`, `voice-assistant`, `home-infra`
 
+## Update 2026-05-25 — codec policy
+
+The original design called for Opus on both directions in M3 to drop
+bandwidth from ~640 Kbit/s to ~64 Kbit/s. After getting M2 talking on
+hardware we revisited this:
+
+- Deployment is **LAN-only** (device → Pi over the home wifi). 640 Kbit/s
+  is trivial on 2.4 GHz / 5 GHz wifi.
+- libopus would add ~10 % of one ESP32-S3 core on top of `micro_wake_word`
+  and the i2s pipeline, plus a non-trivial dependency.
+- Quality gain over PCM16 is zero (PCM16 is lossless to begin with).
+
+**Decision: keep raw PCM16 both directions. M3 is repurposed for polish
+and reliability.** Mentions of "Opus" elsewhere in this doc describe the
+original plan; treat them as historical context rather than the current
+implementation target. If we ever route this stream over the open
+internet (e.g. remote device → Pi via VPN with bandwidth caps), Opus
+comes back on the table.
+
 ## Problem
 
 Current voice pipeline goes:
@@ -321,8 +340,14 @@ device                                 va                    Realtime
 2. **M2 — talking prototype.** New `va_client` component (raw PCM only).
    Separate yaml `home-assistant-voice.va-direct.yaml`. End-to-end speech
    round-trip works. Old pipeline still available on the original yaml.
-3. **M3 — Opus + interrupt + reliability.** Opus both directions, local
-   "stop" interrupt, reconnect with backoff, error.flac on failure.
+3. **M3 — polish + reliability.** Stop-wake-word as interrupt (not new
+   session), XMOS AEC verification, follow-up dialog window after AI
+   replies, on-device latency metrics, graceful error sounds via the
+   restored media_player chain. **Opus was originally planned for this
+   milestone but dropped: on a LAN deployment the 640 Kbit/s aggregate
+   PCM16 stream is trivial for wifi, while libopus adds CPU load on
+   ESP32-S3 already running mww. Revisit only if we ever route over the
+   open internet.**
 4. **M4 — production-ready.** OTA firmware, docker-compose update for
    port 3001 and `VA_DEVICE_TOKEN`, optional WSS. Side-by-side with old
    pipeline as fallback.

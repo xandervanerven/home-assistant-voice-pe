@@ -326,19 +326,24 @@ void VaClient::set_phase_(const std::string &phase) {
     this->cancel_timeout("va_followup");
     this->cancel_timeout("va_followup_open");
     this->followup_pending_ = false;
+    this->idle_emit_pending_ = false;  // new turn began, drop any held idle
   } else if (phase == "idle") {
-    // Follow-up window: AI may have asked a question. BUT we can't enable
-    // the mic right away — phase=idle fires when the server is done
-    // generating, while we may still have several seconds of TTS audio
-    // queued in PSRAM. Opening the mic mid-playback means it picks up the
-    // speaker. Mark a "pending" flag; loop() opens the actual window once
-    // audio_fill_ drains to zero.
+    // Server says response.done, but we may still have seconds of TTS
+    // queued in PSRAM + downstream rings. Two things wait on the queue:
+    //   1) the LED transition to idle (otherwise it goes off while the
+    //      device is still speaking)
+    //   2) opening the follow-up mic window (echo + false VAD trigger)
+    // Mark both pending; the drain handler in loop() releases them
+    // together after the speaker actually finishes.
     if (this->audio_fill_ == 0) {
       this->open_followup_window_();
+      // fall through to fire the trigger normally below
     } else {
-      ESP_LOGI(TAG, "phase=idle but %u bytes still queued; follow-up deferred",
+      ESP_LOGI(TAG, "phase=idle but %u bytes still queued; LED + follow-up deferred",
                (unsigned) this->audio_fill_);
       this->followup_pending_ = true;
+      this->idle_emit_pending_ = true;
+      return;  // suppress immediate trigger fire — open_followup_window_ will fire it later
     }
   }
 
@@ -368,11 +373,23 @@ void VaClient::start_session() {
   // New wake word starts a fresh session — drop any pending or active
   // follow-up window from the previous turn.
   this->followup_pending_ = false;
+  this->idle_emit_pending_ = false;
   this->cancel_timeout("va_followup");
   this->cancel_timeout("va_followup_open");
 }
 
 void VaClient::open_followup_window_() {
+  // If a phase=idle LED transition was held back while audio drained, fire
+  // it now so the LED goes to idle in sync with the speaker actually going
+  // quiet (instead of as soon as the server emitted response.done).
+  if (this->idle_emit_pending_) {
+    this->idle_emit_pending_ = false;
+    this->defer([this]() {
+      for (auto *t : this->phase_triggers_) {
+        t->trigger("idle");
+      }
+    });
+  }
   ESP_LOGI(TAG, "follow-up window open (mic on for %u ms)", (unsigned) kFollowupMs);
   this->streaming_ = true;
   this->set_timeout("va_followup", kFollowupMs, [this]() {
