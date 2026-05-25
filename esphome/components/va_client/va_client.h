@@ -68,10 +68,11 @@ class VaClient : public Component {
   // Scratch buffers reused on the hot path to avoid per-callback heap allocation.
   std::vector<int16_t> mono_buf_;
 
-  // Streaming gate: only true between wake-word `start_session()` and the
-  // server's `phase:idle` (response.done). on_mic_data_ checks this before
-  // forwarding frames.
+  // Streaming gate. True while the mic should be forwarded to the server:
+  //   - between wake-word start_session() and "listening"/"thinking"
+  //   - and again after "idle" for kFollowupMs (in case AI asked a question)
   bool streaming_{false};
+  static constexpr uint32_t kFollowupMs = 5000;
 
   // Tracks the opcode of the in-flight WS message so we can route
   // continuation frames (op_code = 0) to the same handler.

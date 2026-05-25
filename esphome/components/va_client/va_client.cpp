@@ -290,14 +290,43 @@ void VaClient::set_phase_(const std::string &phase) {
   this->current_phase_ = phase;
   ESP_LOGD(TAG, "Phase -> %s", phase.c_str());
 
-  // Close the mic streaming window once the server has heard us
-  // (phase=thinking) — continuing to send mic frames while TTS audio is
-  // streaming back competes for the WS socket on ESP32 and produces choppy
-  // playback. Listening for the next wake word doesn't go through the WS,
-  // it's local mww.
-  if (this->streaming_ && (phase == "thinking" || phase == "replying" || phase == "idle")) {
-    ESP_LOGI(TAG, "phase=%s — mic streaming off", phase.c_str());
-    this->streaming_ = false;
+  // Streaming gate state machine:
+  //   listening  → mic on (user is being heard)
+  //   thinking   → mic off (server processing; sending more burns WS bandwidth
+  //                that TTS needs, and OpenAI ignores audio while a response
+  //                is in flight)
+  //   replying   → mic off (also avoids picking up our own TTS in case XMOS
+  //                AEC isn't perfect)
+  //   idle       → mic on for kFollowupMs so the user can answer a question
+  //                without re-triggering the wake word. Timer expiry closes
+  //                the session.
+  if (phase == "listening") {
+    if (!this->streaming_) {
+      ESP_LOGI(TAG, "phase=listening — mic streaming on");
+      this->streaming_ = true;
+    }
+    this->cancel_timeout("va_followup");
+  } else if (phase == "thinking" || phase == "replying") {
+    if (this->streaming_) {
+      ESP_LOGI(TAG, "phase=%s — mic streaming off", phase.c_str());
+      this->streaming_ = false;
+    }
+    this->cancel_timeout("va_followup");
+  } else if (phase == "idle") {
+    // Open a follow-up window: AI may have asked a question. Mic stays on
+    // for kFollowupMs; if the user speaks, the next "listening" cancels
+    // the timer. Otherwise we close the session.
+    if (!this->streaming_) {
+      ESP_LOGI(TAG, "phase=idle — follow-up window open (mic on for %u ms)",
+               (unsigned) kFollowupMs);
+      this->streaming_ = true;
+    }
+    this->set_timeout("va_followup", kFollowupMs, [this]() {
+      if (this->streaming_) {
+        ESP_LOGI(TAG, "follow-up window expired — mic streaming off");
+        this->streaming_ = false;
+      }
+    });
   }
 
   // set_phase_ may be called from the websocket task; ESPHome triggers and
@@ -323,6 +352,9 @@ void VaClient::start_session() {
   // room — wake word would be cosmetic.
   ESP_LOGI(TAG, "start_session() — streaming on");
   this->streaming_ = true;
+  // If a follow-up window was open from the previous turn, drop it: the new
+  // wake word starts a fresh session.
+  this->cancel_timeout("va_followup");
 }
 
 void VaClient::send_interrupt() {
