@@ -95,6 +95,12 @@ class VaClient : public Component {
   // the mic until the speaker drains, otherwise it picks up its own output.
   // loop() flips this to a live followup window once audio_fill_ hits 0.
   bool followup_pending_{false};
+  // Tracks whether the pending follow-up was requested by the server's
+  // request_follow_up tool (model asked a question) vs the natural
+  // post-reply path. The former wants a longer mic window
+  // (kRequestFollowUpMs); the latter uses kFollowupMs (which is 0 by
+  // default — no auto-follow-up).
+  bool request_follow_up_pending_{false};
   // Server sends phase=idle when OpenAI is done generating, but we still
   // have audio queued in PSRAM + downstream rings. If we fire the LED
   // trigger immediately the device looks idle while still speaking. Hold

@@ -88,9 +88,12 @@ void VaClient::loop() {
   // opening the mic too early lets it pick up the device's own tail, and
   // the server VAD interprets it as user speech.
   if (this->followup_pending_ && this->audio_fill_ == 0) {
+    const bool was_request = this->request_follow_up_pending_;
     this->followup_pending_ = false;
-    this->set_timeout("va_followup_open", kFollowupOpenDelayMs, [this]() {
-      this->open_followup_window_();
+    this->request_follow_up_pending_ = false;
+    const uint32_t duration = was_request ? kRequestFollowUpMs : kFollowupMs;
+    this->set_timeout("va_followup_open", kFollowupOpenDelayMs, [this, duration]() {
+      this->open_followup_window_(duration);
     });
   }
 }
@@ -256,10 +259,21 @@ void VaClient::handle_text_(const char *data, size_t len) {
   if (msg.find("\"type\":\"request_follow_up\"") != std::string::npos) {
     // Server's model called the request_follow_up tool — it asked a
     // question and wants the user to answer without saying a wake word.
-    // Open a one-shot follow-up window regardless of kFollowupMs (which
-    // we keep at 0 by default to avoid speaker echo).
-    ESP_LOGI(TAG, "request_follow_up — opening %u ms mic window", (unsigned) kRequestFollowUpMs);
-    this->open_followup_window_(kRequestFollowUpMs);
+    // BUT this message arrives with the question's audio still queued in
+    // PSRAM + downstream rings — opening the mic now means it picks up
+    // the AI's own question. Defer to loop()'s drain handler, same as
+    // the natural-idle path; mark this as a request-driven follow-up so
+    // the longer kRequestFollowUpMs window applies once it fires.
+    if (this->audio_fill_ == 0) {
+      ESP_LOGI(TAG, "request_follow_up — opening %u ms mic window",
+               (unsigned) kRequestFollowUpMs);
+      this->open_followup_window_(kRequestFollowUpMs);
+    } else {
+      ESP_LOGI(TAG, "request_follow_up but %u bytes still queued; mic window deferred",
+               (unsigned) this->audio_fill_);
+      this->followup_pending_ = true;
+      this->request_follow_up_pending_ = true;
+    }
     return;
   }
 
@@ -380,6 +394,7 @@ void VaClient::set_phase_(const std::string &phase) {
     this->cancel_timeout("va_followup_open");
     this->cancel_timeout("va_no_speech");
     this->followup_pending_ = false;
+    this->request_follow_up_pending_ = false;
     this->idle_emit_pending_ = false;  // new turn began, drop any held idle
   } else if (phase == "idle") {
     // Only open a follow-up window if we just finished a real turn —
@@ -398,6 +413,7 @@ void VaClient::set_phase_(const std::string &phase) {
       this->suppress_followup_ = false;
       this->streaming_ = false;
       this->followup_pending_ = false;
+      this->request_follow_up_pending_ = false;
       this->idle_emit_pending_ = false;
     } else if (this->audio_fill_ == 0) {
       // Server says response.done and the device has actually played out.
@@ -446,6 +462,7 @@ void VaClient::start_session() {
   // New wake word starts a fresh session — drop any pending or active
   // follow-up window from the previous turn.
   this->followup_pending_ = false;
+  this->request_follow_up_pending_ = false;
   this->idle_emit_pending_ = false;
   this->suppress_followup_ = false;
   this->cancel_timeout("va_followup");
@@ -542,6 +559,7 @@ void VaClient::send_interrupt() {
   this->audio_tail_ = 0;
   this->audio_fill_ = 0;
   this->followup_pending_ = false;
+  this->request_follow_up_pending_ = false;
   this->idle_emit_pending_ = false;
   this->cancel_timeout("va_no_speech");
   this->cancel_timeout("va_followup");
