@@ -2,7 +2,6 @@
 
 **Status:** Draft
 **Date:** 2026-05-25
-**Author:** maxim.lepekha@sumsub.com (with Claude)
 **Affects:** `home-assistant-voice-pe`, `voice-assistant`, `home-infra`
 
 ## Problem
