@@ -79,6 +79,13 @@ void VaClient::connect_() {
 }
 
 void VaClient::schedule_reconnect_() {
+  // esp_websocket_client emits multiple events per failure (DISCONNECTED,
+  // CLOSED, sometimes ERROR). Coalesce them into a single reconnect.
+  if (this->reconnect_pending_) {
+    return;
+  }
+  this->reconnect_pending_ = true;
+
   uint32_t delay = this->reconnect_delay_ms_;
   ESP_LOGI(TAG, "Scheduling reconnect in %u ms", (unsigned) delay);
   // Backoff schedule: 1s -> 2s -> 5s -> 10s (capped).
@@ -89,7 +96,10 @@ void VaClient::schedule_reconnect_() {
   } else {
     this->reconnect_delay_ms_ = 10000;
   }
-  this->set_timeout("va_reconnect", delay, [this]() { this->connect_(); });
+  this->set_timeout("va_reconnect", delay, [this]() {
+    this->reconnect_pending_ = false;
+    this->connect_();
+  });
 }
 
 void VaClient::on_ws_event(int32_t event_id, void *event_data) {

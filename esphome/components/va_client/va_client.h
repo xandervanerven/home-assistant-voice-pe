@@ -55,6 +55,10 @@ class VaClient : public Component {
   bool ws_connected_{false};
 
   uint32_t reconnect_delay_ms_{1000};
+  // Set when a reconnect timer is in flight. esp_websocket_client emits both
+  // DISCONNECTED and CLOSED (and sometimes ERROR) per failure; without this
+  // guard we'd double-bump the backoff delay and double-log.
+  bool reconnect_pending_{false};
 
   std::string current_phase_{"idle"};
   std::vector<OnPhaseTrigger *> phase_triggers_;
