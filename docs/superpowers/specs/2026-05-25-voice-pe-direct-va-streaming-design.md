@@ -24,8 +24,10 @@ synchronously.
 Cut latency to sub-second first-audio by:
 
 1. Bypassing Home Assistant entirely for voice traffic.
-2. Using OpenAI Realtime API (audio-in/audio-out single WebSocket) so STT,
-   LLM, and TTS overlap on the server side.
+2. Using OpenAI Realtime API GA (`gpt-realtime-2`) — single audio-in/audio-out
+   WebSocket so STT, LLM, and TTS overlap on the server side. Default voice
+   is `marin` (or `cedar` for best quality); reasoning effort `low` is the
+   production default.
 3. Letting voice-assistant act as a thin bridge between the device and
    Realtime, while keeping HA only for tool execution via the existing MCP
    integration.
