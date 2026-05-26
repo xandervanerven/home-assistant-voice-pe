@@ -17,8 +17,8 @@ Skips its own tag to avoid feedback loops if sendto() fails.
 
 import esphome.codegen as cg
 import esphome.config_validation as cv
-from esphome.components import logger
-from esphome.const import CONF_ID, CONF_LEVEL, CONF_PORT
+from esphome.components import logger, time as time_
+from esphome.const import CONF_ID, CONF_LEVEL, CONF_PORT, CONF_TIME_ID
 
 CODEOWNERS = ["@maxmaxme"]
 DEPENDENCIES = ["network", "logger"]
@@ -47,6 +47,11 @@ CONFIG_SCHEMA = cv.Schema(
         cv.Required(CONF_HOST): cv.string,
         cv.Optional(CONF_PORT, default=5140): cv.port,
         cv.Optional(CONF_LEVEL, default="INFO"): cv.enum(LOG_LEVELS, upper=True),
+        # Optional pointer to a `time:` component (sntp, homeassistant, ...).
+        # If wired, log JSON gets a `time` field in epoch millis matching
+        # pino's output. Without it the field is omitted and Dozzle uses
+        # its own arrival timestamp.
+        cv.Optional(CONF_TIME_ID): cv.use_id(time_.RealTimeClock),
     }
 ).extend(cv.COMPONENT_SCHEMA)
 
@@ -62,3 +67,6 @@ async def to_code(config):
     cg.add(var.set_host(config[CONF_HOST]))
     cg.add(var.set_port(config[CONF_PORT]))
     cg.add(var.set_min_level(config[CONF_LEVEL]))
+    if CONF_TIME_ID in config:
+        clock = await cg.get_variable(config[CONF_TIME_ID])
+        cg.add(var.set_time(clock))

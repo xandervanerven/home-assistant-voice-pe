@@ -1727,10 +1727,18 @@ external_components:
 # show up in Dozzle alongside the rest of the stack. See voice-pe-logs in
 # home-infra/docker-compose.yml. Skip if the sink isn't running — sendto()
 # fails silently and the device keeps running.
+# va-direct: NTP wall clock for udp_log timestamps. Without this every JSON
+# log line goes out without `time` and Dozzle has to stamp by packet
+# arrival — fine but coarse. SNTP costs near-nothing.
+time:
+  - platform: sntp
+    id: sntp_time
+
 udp_log:
   host: va.local
   port: 5140
   level: INFO
+  time_id: sntp_time
 
 va_client:
   id: va

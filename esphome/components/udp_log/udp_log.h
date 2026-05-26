@@ -1,11 +1,17 @@
 #pragma once
 #include "esphome/core/component.h"
+#include "esphome/core/time.h"
 #include <cstdint>
 #include <string>
 
 #include <lwip/sockets.h>
 
 namespace esphome {
+
+namespace time {
+class RealTimeClock;
+}  // namespace time
+
 namespace udp_log {
 
 class UdpLog : public Component {
@@ -13,6 +19,7 @@ class UdpLog : public Component {
   void set_host(const std::string &host) { host_ = host; }
   void set_port(uint16_t port) { port_ = port; }
   void set_min_level(int level) { min_level_ = level; }
+  void set_time(time::RealTimeClock *clock) { time_ = clock; }
 
   void setup() override;
   void dump_config() override;
@@ -32,6 +39,10 @@ class UdpLog : public Component {
   std::string host_;
   uint16_t port_{5140};
   int min_level_{ESPHOME_LOG_LEVEL_INFO};
+  // Optional wall-clock source. When set, emit a `time` field (epoch ms)
+  // matching pino's output so Dozzle renders identically to the rest of
+  // the home-infra stack.
+  time::RealTimeClock *time_{nullptr};
 
   int sock_fd_{-1};
   struct sockaddr_in dest_{};

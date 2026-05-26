@@ -3,6 +3,8 @@
 #include "esphome/core/application.h"
 #include "esphome/components/logger/logger.h"
 #include "esphome/components/network/util.h"
+#include "esphome/components/time/real_time_clock.h"
+#include "esphome/core/time.h"
 
 #include <cstdio>
 #include <cstring>
@@ -94,6 +96,78 @@ void UdpLog::log_trampoline_(void *self_v, uint8_t level, const char *tag,
     self->on_log_(level, tag, message, length);
 }
 
+// ESPHome → Dozzle level name mapping. Dozzle's level_guesser checks the
+// JSON `level` field but only accepts STRING values ("error", "warn",
+// "info", "debug", "trace"); pino-style integers fall through unmatched.
+// We emit strings so Dozzle paints severity dots correctly.
+static const char *esphome_level_to_name_(int level) {
+  switch (level) {
+    case 1:  // ESPHOME_LOG_LEVEL_ERROR
+      return "error";
+    case 2:  // ESPHOME_LOG_LEVEL_WARN
+      return "warn";
+    case 3:  // ESPHOME_LOG_LEVEL_INFO
+    case 4:  // ESPHOME_LOG_LEVEL_CONFIG
+      return "info";
+    case 5:  // ESPHOME_LOG_LEVEL_DEBUG
+      return "debug";
+    default:  // VERBOSE / VERY_VERBOSE
+      return "trace";
+  }
+}
+
+// Append `src[0..len)` to `buf[*pos..cap)`, JSON-escaping double quotes,
+// backslashes, common whitespace, control chars, and ANSI escape
+// sequences ("\x1b[...m") which ESPHome's log message can contain when
+// colours are enabled. Stops early if there's no room; we never overflow
+// `buf` and always leave space for the trailing `"}\n`.
+static void json_escape_(const char *src, size_t len, char *buf, size_t cap, size_t *pos) {
+  size_t p = *pos;
+  for (size_t i = 0; i < len; i++) {
+    if (p + 8 >= cap)
+      break;
+    unsigned char c = static_cast<unsigned char>(src[i]);
+    // Strip ANSI CSI sequences inline so msg stays readable in JSON.
+    if (c == 0x1b && i + 1 < len && src[i + 1] == '[') {
+      i += 2;
+      while (i < len && !((src[i] >= 'A' && src[i] <= 'Z') ||
+                          (src[i] >= 'a' && src[i] <= 'z'))) {
+        i++;
+      }
+      continue;  // skip the final letter too (for-loop's ++i)
+    }
+    switch (c) {
+      case '"':
+      case '\\':
+        buf[p++] = '\\';
+        buf[p++] = c;
+        break;
+      case '\n':
+        buf[p++] = '\\';
+        buf[p++] = 'n';
+        break;
+      case '\r':
+        buf[p++] = '\\';
+        buf[p++] = 'r';
+        break;
+      case '\t':
+        buf[p++] = '\\';
+        buf[p++] = 't';
+        break;
+      default:
+        if (c < 0x20) {
+          int n = std::snprintf(buf + p, cap - p, "\\u%04x", c);
+          if (n > 0)
+            p += static_cast<size_t>(n);
+        } else {
+          buf[p++] = static_cast<char>(c);
+        }
+        break;
+    }
+  }
+  *pos = p;
+}
+
 void UdpLog::on_log_(int level, const char *tag, const char *message, size_t length) {
   if (level > this->min_level_)
     return;
@@ -106,31 +180,52 @@ void UdpLog::on_log_(int level, const char *tag, const char *message, size_t len
     return;
 
   this->sending_ = true;
-  // ESPHome's callback gives us "[HH:MM:SS][L][tag:line]: msg" shape, may
-  // contain ANSI colour escapes — strip so the sink doesn't render garbage.
-  char buf[513];
-  size_t n = length;
-  if (n >= sizeof(buf) - 1)
-    n = sizeof(buf) - 2;
-  size_t w = 0;
-  for (size_t r = 0; r < n; ++r) {
-    char c = message[r];
-    if (c == 0x1b && r + 1 < n && message[r + 1] == '[') {
-      r += 2;
-      while (r < n && !((message[r] >= 'A' && message[r] <= 'Z') ||
-                        (message[r] >= 'a' && message[r] <= 'z'))) {
-        ++r;
-      }
-      continue;
+  // Emit pino-compatible JSON so Dozzle renders these alongside the
+  // voice-assistant container's output with the same colouring / level
+  // chips. The `message` ESPHome hands us is the full formatted line
+  // ("[hh:mm:ss][I][tag:line]: text"); ship it as-is in `msg` to preserve
+  // source line info. `scope` carries the bare tag for filtering.
+  // No `time` field — Dozzle stamps each packet from the docker side.
+  char buf[640];
+  size_t p = 0;
+  int n = std::snprintf(buf, sizeof(buf), "{\"level\":\"%s\"",
+                        esphome_level_to_name_(level));
+  if (n > 0)
+    p = static_cast<size_t>(n);
+  // pino-style time: epoch millis. Only emit if NTP has synced (timestamp
+  // > 2020-01-01 sanity check); otherwise the reading is meaningless and
+  // would confuse log viewers. millis()-since-boot can be inferred from
+  // packet arrival if needed.
+  if (this->time_ != nullptr) {
+    auto now = this->time_->now();
+    if (now.is_valid() && now.timestamp > 1577836800 /* 2020-01-01 */) {
+      uint64_t ts_ms =
+          static_cast<uint64_t>(now.timestamp) * 1000ULL + (millis() % 1000ULL);
+      n = std::snprintf(buf + p, sizeof(buf) - p, ",\"time\":%llu",
+                        static_cast<unsigned long long>(ts_ms));
+      if (n > 0)
+        p += static_cast<size_t>(n);
     }
-    buf[w++] = c;
   }
-  if (w == 0 || buf[w - 1] != '\n')
-    buf[w++] = '\n';
-  // sendto on a non-blocking UDP socket — fire and forget; if the kernel
-  // buffer is briefly full we'd rather drop this line than block the
-  // caller (which can be any task).
-  ::sendto(this->sock_fd_, buf, w, 0, reinterpret_cast<const struct sockaddr *>(&this->dest_),
+  if (p + 11 < sizeof(buf)) {
+    std::memcpy(buf + p, ",\"scope\":\"", 10);
+    p += 10;
+  }
+  if (tag != nullptr)
+    json_escape_(tag, std::strlen(tag), buf, sizeof(buf), &p);
+  if (p + 9 < sizeof(buf)) {
+    std::memcpy(buf + p, "\",\"msg\":\"", 9);
+    p += 9;
+  }
+  json_escape_(message, length, buf, sizeof(buf), &p);
+  // Always leave room for the closing `"}\n`.
+  if (p + 3 > sizeof(buf))
+    p = sizeof(buf) - 3;
+  buf[p++] = '"';
+  buf[p++] = '}';
+  buf[p++] = '\n';
+
+  ::sendto(this->sock_fd_, buf, p, 0, reinterpret_cast<const struct sockaddr *>(&this->dest_),
            sizeof(this->dest_));
   this->sending_ = false;
 }
