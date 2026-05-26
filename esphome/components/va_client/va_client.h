@@ -185,13 +185,15 @@ class VaClient : public Component {
   bool last_data_was_binary_{false};
 
   // Software TTS gain applied in handle_binary_ before queueing audio.
-  // OpenAI Realtime output peaks around -3..-6 dBFS — perceptibly quieter
-  // than the upstream HA TTS engines which sit near 0 dBFS. 2/1 = +6 dB
-  // is loud enough to match the upstream feel and still has headroom
-  // because volume_max in the media_player block caps us at 0.85.
-  // Raise the numerator carefully — speech that clips sounds buzzy, not
-  // just loud.
-  static constexpr int32_t kTtsGainNumerator = 2;
+  // Disabled (1/1, unity gain) because the previous +6 dB value was
+  // clipping loud syllables — instrumented turns showed thousands of
+  // saturated samples per reply on long phrases, audibly buzzy/hissy.
+  // OpenAI Realtime output peaks around -3 dBFS which is plenty for
+  // the speaker chain; the DAC + amp provide more than enough gain
+  // headroom (media_player volume_max caps at 0.85, well below clip).
+  // If we ever need it back, do it as a soft-knee compressor instead
+  // of a hard multiplier so loud samples don't slam into int16 walls.
+  static constexpr int32_t kTtsGainNumerator = 1;
   static constexpr int32_t kTtsGainDenominator = 1;
 
   // Output volume multiplier in [0, 1], updated from yaml whenever
