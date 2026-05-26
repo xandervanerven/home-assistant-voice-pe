@@ -60,57 +60,78 @@ void VaClient::setup() {
 void VaClient::loop() {
   // Drain the audio ring buffer into the speaker. speaker.play() accepts
   // only what fits in its own ring (returns the count actually queued).
-  if (this->speaker_ == nullptr || this->audio_buf_ == nullptr || this->audio_fill_ == 0)
-    return;
-  // Contiguous slice we can hand to play() without copying: from head to
-  // either the end of the buffer or the tail.
-  size_t contiguous = (this->audio_head_ < this->audio_tail_)
-                          ? (this->audio_tail_ - this->audio_head_)
-                          : (kAudioBufBytes - this->audio_head_);
-  if (contiguous > this->audio_fill_)
-    contiguous = this->audio_fill_;
-  size_t accepted = this->speaker_->play(this->audio_buf_ + this->audio_head_, contiguous);
-  if (accepted == 0)
-    return;
-  this->audio_head_ = (this->audio_head_ + accepted) % kAudioBufBytes;
-  this->audio_fill_ -= accepted;
-  static uint32_t dbg_last = 0;
-  uint32_t now = millis();
-  if (now - dbg_last >= 500) {
-    ESP_LOGD(TAG, "drained %u bytes (%u still queued)", (unsigned) accepted,
-             (unsigned) this->audio_fill_);
-    dbg_last = now;
+  if (this->speaker_ != nullptr && this->audio_buf_ != nullptr && this->audio_fill_ > 0) {
+    // Contiguous slice we can hand to play() without copying: from head to
+    // either the end of the buffer or the tail.
+    size_t contiguous = (this->audio_head_ < this->audio_tail_)
+                            ? (this->audio_tail_ - this->audio_head_)
+                            : (kAudioBufBytes - this->audio_head_);
+    if (contiguous > this->audio_fill_)
+      contiguous = this->audio_fill_;
+    size_t accepted = this->speaker_->play(this->audio_buf_ + this->audio_head_, contiguous);
+    if (accepted > 0) {
+      this->audio_head_ = (this->audio_head_ + accepted) % kAudioBufBytes;
+      this->audio_fill_ -= accepted;
+      static uint32_t dbg_last = 0;
+      uint32_t now = millis();
+      if (now - dbg_last >= 500) {
+        ESP_LOGD(TAG, "drained %u bytes (%u still queued)", (unsigned) accepted,
+                 (unsigned) this->audio_fill_);
+        dbg_last = now;
+      }
+    }
   }
-  // If a follow-up window was deferred while audio was draining, schedule
-  // it to open AFTER the downstream buffers (resampler ring + mixer ring +
-  // i2s_audio_speaker 500ms ring) finish playing. Just because our PSRAM
-  // queue is empty doesn't mean the user has heard the audio yet —
-  // opening the mic too early lets it pick up the device's own tail, and
-  // the server VAD interprets it as user speech.
-  if (this->followup_pending_ && this->audio_fill_ == 0) {
-    const bool was_request = this->request_follow_up_pending_;
-    this->followup_pending_ = false;
-    this->request_follow_up_pending_ = false;
-    if (was_request) {
-      // Request-driven path: wait for the TTS hardware tail to clear,
-      // then arm the follow-up and let yaml own the chime → wait_until →
-      // i2s tail → commit_followup_mic flow. This mirrors the wake-word
-      // path exactly (wait_until not is_announcing + delay) so the LED
-      // and the actual mic-open moment line up.
-      this->set_timeout("va_tts_tail", kTtsTailMs, [this]() {
-        this->open_followup_window_(0);  // emit deferred idle LED + latency log; no mic
+  // If a follow-up window was deferred while audio was draining, wait for
+  // the downstream chain (resampler + mixer + i2s + DAC tail) to actually
+  // finish playing before firing the deferred LED-idle / chime trigger.
+  // Just because our PSRAM queue is empty doesn't mean the user has heard
+  // the audio yet — and an "сейчас посмотрю" preamble before a tool call
+  // would drain the ring mid-turn, so we can't act on audio_fill_==0
+  // alone.
+  //
+  // Primary signal: speaker_->is_stopped(). The resampling speaker
+  // transitions to STOPPED only after every byte we wrote has actually
+  // gone out through the i2s pipeline.
+  //
+  // Fallback: kSpeakerStopTimeoutMs (3 s). If something wedges and the
+  // speaker never reports STOPPED, we still progress so the LED doesn't
+  // lock in `replying`.
+  if (this->followup_pending_ && this->audio_fill_ == 0 &&
+      !this->waiting_for_speaker_stop_) {
+    this->waiting_for_speaker_stop_ = true;
+    this->speaker_stop_wait_started_ms_ = millis();
+  }
+  if (this->waiting_for_speaker_stop_) {
+    const bool speaker_stopped =
+        (this->speaker_ != nullptr) && this->speaker_->is_stopped();
+    const bool timed_out =
+        (millis() - this->speaker_stop_wait_started_ms_) >= kSpeakerStopTimeoutMs;
+    if (speaker_stopped || timed_out) {
+      if (timed_out && !speaker_stopped) {
+        ESP_LOGW(TAG,
+                 "speaker didn't transition to STOPPED in %u ms — "
+                 "proceeding anyway (fallback)",
+                 (unsigned) kSpeakerStopTimeoutMs);
+      }
+      this->waiting_for_speaker_stop_ = false;
+      const bool was_request = this->request_follow_up_pending_;
+      this->followup_pending_ = false;
+      this->request_follow_up_pending_ = false;
+      if (was_request) {
+        // Request-driven path: speaker has drained, now hand off to yaml
+        // for the chime → wait_until !is_announcing → commit_followup_mic
+        // sequence (announcement lane is separate from the TTS lane we
+        // just waited on, so the chime won't collide with our tail).
+        this->open_followup_window_(0);  // emit deferred LED idle + latency log; no mic
         this->followup_armed_ = true;
         for (auto *t : this->followup_opened_triggers_) {
           t->trigger();
         }
-      });
-    } else {
-      // Natural-idle path (kFollowupMs = 0): no chime, no mic — just let
-      // the existing settle delay run so the deferred LED idle emit
-      // fires after the speaker has actually gone quiet.
-      this->set_timeout("va_followup_open", kFollowupOpenDelayMs, [this]() {
+      } else {
+        // Natural-idle path (kFollowupMs = 0): just emit the deferred
+        // LED idle. No chime, no mic.
         this->open_followup_window_(kFollowupMs);
-      });
+      }
     }
   }
 }
@@ -285,28 +306,16 @@ void VaClient::handle_text_(const char *data, size_t len) {
   if (msg.find("\"type\":\"request_follow_up\"") != std::string::npos) {
     // Server's model called the request_follow_up tool — it asked a
     // question and wants the user to answer without saying a wake word.
-    // BUT this message arrives with the question's audio still queued in
-    // PSRAM + downstream rings — opening the mic now means it picks up
-    // the AI's own question. Defer to loop()'s drain handler, same as
-    // the natural-idle path; mark this as a request-driven follow-up so
-    // the longer kRequestFollowUpMs window applies once it fires.
-    if (this->audio_fill_ == 0) {
-      // Already drained — still wait kTtsTailMs for the i2s tail to
-      // clear before firing the chime, then yaml drives the rest.
-      ESP_LOGI(TAG, "request_follow_up — arming chime in %u ms",
-               (unsigned) kTtsTailMs);
-      this->set_timeout("va_tts_tail", kTtsTailMs, [this]() {
-        this->followup_armed_ = true;
-        for (auto *t : this->followup_opened_triggers_) {
-          t->trigger();
-        }
-      });
-    } else {
-      ESP_LOGI(TAG, "request_follow_up but %u bytes still queued; mic window deferred",
-               (unsigned) this->audio_fill_);
-      this->followup_pending_ = true;
-      this->request_follow_up_pending_ = true;
-    }
+    // Defer to loop()'s waiting_for_speaker_stop_ logic so we only fire
+    // the chime + arm the mic after speaker_->is_stopped() returns true
+    // (i.e. the i2s pipeline has finished playing the question's audio).
+    // Setting both pending flags is idempotent — loop() handles both the
+    // "already drained" and "still queued" cases uniformly via the
+    // speaker-state poll.
+    ESP_LOGI(TAG, "request_follow_up — waiting for speaker drain (%u bytes queued)",
+             (unsigned) this->audio_fill_);
+    this->followup_pending_ = true;
+    this->request_follow_up_pending_ = true;
     return;
   }
 
@@ -458,6 +467,7 @@ void VaClient::set_phase_(const std::string &phase) {
     this->cancel_timeout("va_tts_tail");
     this->cancel_timeout("va_no_speech");
     this->followup_pending_ = false;
+    this->waiting_for_speaker_stop_ = false;
     this->request_follow_up_pending_ = false;
     this->followup_armed_ = false;
     this->idle_emit_pending_ = false;  // new turn began, drop any held idle
@@ -478,6 +488,7 @@ void VaClient::set_phase_(const std::string &phase) {
       this->suppress_followup_ = false;
       this->streaming_ = false;
       this->followup_pending_ = false;
+      this->waiting_for_speaker_stop_ = false;
       this->request_follow_up_pending_ = false;
       this->followup_armed_ = false;
       this->cancel_timeout("va_tts_tail");
@@ -529,6 +540,7 @@ void VaClient::start_session() {
   // New wake word starts a fresh session — drop any pending or active
   // follow-up window from the previous turn.
   this->followup_pending_ = false;
+  this->waiting_for_speaker_stop_ = false;
   this->request_follow_up_pending_ = false;
   this->followup_armed_ = false;
   this->idle_emit_pending_ = false;
@@ -651,6 +663,7 @@ void VaClient::send_interrupt() {
   this->audio_tail_ = 0;
   this->audio_fill_ = 0;
   this->followup_pending_ = false;
+  this->waiting_for_speaker_stop_ = false;
   this->request_follow_up_pending_ = false;
   this->followup_armed_ = false;
   this->idle_emit_pending_ = false;

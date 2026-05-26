@@ -159,12 +159,21 @@ class VaClient : public Component {
   // the mic — every leak triggers the server VAD because the XMOS AEC
   // doesn't fully cancel our own speaker output (M3.2 measured ~10× leak).
   static constexpr uint32_t kFollowupOpenDelayMs = 1500;
-  // After the PSRAM queue drains, how long to wait for the TTS hardware
-  // tail (resampler + mixer + i2s + DAC ≈ 750 ms) to clear before
-  // firing the on_followup_opened trigger. If the chime starts while
-  // the TTS tail is still in the mixer the user hears them overlap and
-  // the cue gets muddy. 800 ms gives a small safety margin.
-  static constexpr uint32_t kTtsTailMs = 800;
+  // Hard ceiling on how long we'll wait for speaker_->is_stopped() after
+  // the PSRAM ring drains before giving up and proceeding anyway. Should
+  // be > the worst-case TTS-tail (~750 ms) by a comfortable margin so we
+  // don't trip in normal operation, but short enough that a wedged
+  // speaker doesn't lock the LED in `replying` forever.
+  static constexpr uint32_t kSpeakerStopTimeoutMs = 3000;
+
+  // True while we're waiting for the downstream speaker chain to actually
+  // finish playing the TTS we wrote into it. Entered when audio_fill_
+  // hits 0 with followup_pending_ set; exited when speaker_->is_stopped()
+  // returns true OR kSpeakerStopTimeoutMs elapses.
+  bool waiting_for_speaker_stop_{false};
+  // millis() snapshot from when waiting_for_speaker_stop_ went true.
+  // Used to fire the fallback timeout if the speaker never reports stop.
+  uint32_t speaker_stop_wait_started_ms_{0};
 
   // Tracks the opcode of the in-flight WS message so we can route
   // continuation frames (op_code = 0) to the same handler.
