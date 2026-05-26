@@ -8,6 +8,9 @@
 #include <string>
 #include <vector>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/portmacro.h>
+
 namespace esphome {
 namespace va_client {
 
@@ -208,6 +211,19 @@ class VaClient : public Component {
   size_t audio_head_{0};  // read pos (next byte to play)
   size_t audio_tail_{0};  // write pos (next byte to fill)
   size_t audio_fill_{0};  // bytes currently queued (audio_tail_ ≥ audio_head_ when not wrapped)
+  // ESP32-S3 is dual-core: handle_binary_ runs in the esp-idf
+  // websocket task (background) while loop() runs in the main app task,
+  // typically on the other core. Both touch audio_head_/tail_/fill_
+  // and the PSRAM data they index; without sync we hit races where
+  // fill_ goes inconsistent, the reader sees the new tail before the
+  // memcpy is visible, or two non-atomic increments lose each other.
+  // The DAC then plays whatever bytes happened to be at those PSRAM
+  // offsets — audible as "speech drops into hiss" mid-utterance.
+  // portMUX is the cheapest cross-core primitive: a spinlock that
+  // also masks interrupts on the holding core. Critical sections
+  // are tiny (a few field updates + ≤2 memcpys of at most a few KB
+  // per WS frame), so contention is negligible.
+  portMUX_TYPE ring_mux_ = portMUX_INITIALIZER_UNLOCKED;
 
   // Per-turn latency anchors (millis()-relative). Captured at each state
   // transition; flushed as one summary line when the deferred phase=idle

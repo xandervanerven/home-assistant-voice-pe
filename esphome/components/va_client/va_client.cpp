@@ -60,24 +60,36 @@ void VaClient::setup() {
 void VaClient::loop() {
   // Drain the audio ring buffer into the speaker. speaker.play() accepts
   // only what fits in its own ring (returns the count actually queued).
-  if (this->speaker_ != nullptr && this->audio_buf_ != nullptr && this->audio_fill_ > 0) {
-    // Contiguous slice we can hand to play() without copying: from head to
-    // either the end of the buffer or the tail.
-    size_t contiguous = (this->audio_head_ < this->audio_tail_)
-                            ? (this->audio_tail_ - this->audio_head_)
-                            : (kAudioBufBytes - this->audio_head_);
-    if (contiguous > this->audio_fill_)
-      contiguous = this->audio_fill_;
-    size_t accepted = this->speaker_->play(this->audio_buf_ + this->audio_head_, contiguous);
-    if (accepted > 0) {
-      this->audio_head_ = (this->audio_head_ + accepted) % kAudioBufBytes;
-      this->audio_fill_ -= accepted;
-      static uint32_t dbg_last = 0;
-      uint32_t now = millis();
-      if (now - dbg_last >= 500) {
-        ESP_LOGD(TAG, "drained %u bytes (%u still queued)", (unsigned) accepted,
-                 (unsigned) this->audio_fill_);
-        dbg_last = now;
+  if (this->speaker_ != nullptr && this->audio_buf_ != nullptr) {
+    // Snapshot ring state under the lock — head/tail/fill are all
+    // mutated from the WS task on the other core.
+    portENTER_CRITICAL(&this->ring_mux_);
+    size_t head = this->audio_head_;
+    size_t tail = this->audio_tail_;
+    size_t fill = this->audio_fill_;
+    portEXIT_CRITICAL(&this->ring_mux_);
+    if (fill > 0) {
+      // Contiguous slice we can hand to play() without copying: from head
+      // to either the end of the buffer or the tail.
+      size_t contiguous = (head < tail) ? (tail - head) : (kAudioBufBytes - head);
+      if (contiguous > fill)
+        contiguous = fill;
+      // play() runs OUTSIDE the critical section: it can take milliseconds
+      // (resampler ring may be full, mixer blocks). Holding ring_mux_
+      // across it would block the writer and cause audio underrun.
+      size_t accepted = this->speaker_->play(this->audio_buf_ + head, contiguous);
+      if (accepted > 0) {
+        portENTER_CRITICAL(&this->ring_mux_);
+        this->audio_head_ = (this->audio_head_ + accepted) % kAudioBufBytes;
+        this->audio_fill_ -= accepted;
+        portEXIT_CRITICAL(&this->ring_mux_);
+        static uint32_t dbg_last = 0;
+        uint32_t now = millis();
+        if (now - dbg_last >= 500) {
+          ESP_LOGD(TAG, "drained %u bytes (%u still queued)", (unsigned) accepted,
+                   (unsigned) (fill - accepted));
+          dbg_last = now;
+        }
       }
     }
   }
@@ -351,7 +363,12 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
     this->turn_t_first_audio_out_ = millis();
   }
   // PCM16 mono @ 24 kHz, append to ring buffer. loop() drains.
-  size_t free_space = kAudioBufBytes - this->audio_fill_;
+  // Snapshot audio_fill_ under the lock — it's modified by loop() on the
+  // other core and we can't trust a torn read.
+  size_t free_space;
+  portENTER_CRITICAL(&this->ring_mux_);
+  free_space = kAudioBufBytes - this->audio_fill_;
+  portEXIT_CRITICAL(&this->ring_mux_);
   if (len > free_space) {
     ESP_LOGW(TAG, "audio buffer overflow: dropping %u bytes (have %u free of %u total)",
              (unsigned) (len - free_space), (unsigned) free_space, (unsigned) kAudioBufBytes);
@@ -390,13 +407,22 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
     len = pairs * 2;
   }
   // Two-part write: from tail to end, then wrap to start.
-  size_t first = std::min(len, kAudioBufBytes - this->audio_tail_);
-  std::memcpy(this->audio_buf_ + this->audio_tail_, data, first);
+  // We need a stable snapshot of audio_tail_ for the memcpy destination,
+  // then commit tail + fill atomically with the writes so the reader on
+  // the other core never sees a new tail before the memcpy completed.
+  // Doing the memcpy *inside* the critical section is the simplest way
+  // to guarantee that ordering — len is at most a few KB per WS frame
+  // and PSRAM memcpy is ~10–20 µs, well under any audio deadline.
+  portENTER_CRITICAL(&this->ring_mux_);
+  size_t tail = this->audio_tail_;
+  size_t first = std::min(len, kAudioBufBytes - tail);
+  std::memcpy(this->audio_buf_ + tail, data, first);
   if (first < len) {
     std::memcpy(this->audio_buf_, data + first, len - first);
   }
-  this->audio_tail_ = (this->audio_tail_ + len) % kAudioBufBytes;
+  this->audio_tail_ = (tail + len) % kAudioBufBytes;
   this->audio_fill_ += len;
+  portEXIT_CRITICAL(&this->ring_mux_);
   // No per-chunk log — fires 50+ times per reply at DEBUG and drowns the
   // log. The throttled drain log in loop() gives enough visibility into
   // queue depth.
@@ -671,10 +697,15 @@ void VaClient::send_interrupt() {
   // resampler/mixer/leaf will still drain (~600 ms residual), but everything
   // we have yet to hand off is dropped. The yaml side stops the resampler
   // explicitly. Reset deferred state too so we don't accidentally hold an
-  // "idle" emit waiting for the (now-empty) queue.
+  // "idle" emit waiting for the (now-empty) queue. The ring reset has to
+  // happen under the mux: the WS task could be mid-write and seeing
+  // head=tail=fill=0 partway through would let it write into a "freshly
+  // empty" buffer the user just barge-cancelled.
+  portENTER_CRITICAL(&this->ring_mux_);
   this->audio_head_ = 0;
   this->audio_tail_ = 0;
   this->audio_fill_ = 0;
+  portEXIT_CRITICAL(&this->ring_mux_);
   this->followup_pending_ = false;
   this->waiting_for_speaker_stop_ = false;
   this->request_follow_up_pending_ = false;
