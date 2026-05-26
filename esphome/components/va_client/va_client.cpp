@@ -102,14 +102,27 @@ void VaClient::loop() {
     this->speaker_stop_wait_started_ms_ = millis();
   }
   if (this->waiting_for_speaker_stop_) {
-    const bool speaker_stopped =
-        (this->speaker_ != nullptr) && this->speaker_->is_stopped();
+    // Use has_buffered_data() instead of is_stopped(): the resampler only
+    // transitions to STATE_STOPPED once its downstream (mixer source)
+    // reports stopped, but our mixer sources are configured `timeout:
+    // never` and stay RUNNING forever, so is_stopped() would never fire
+    // and we'd always hit the fallback. has_buffered_data() walks the
+    // chain (resampler ring + mixer source ring) and returns false as
+    // soon as both have drained — exactly what we want.
+    //
+    // Note: this does *not* cover the i2s 500ms ring + ~100ms DAC tail
+    // downstream of the mixer. We fire ~500ms before true silence. For
+    // the LED that's imperceptible; for the request_follow_up chime,
+    // yaml's wait_until !is_announcing + i2s tail delay already absorbs
+    // any small overlap with the fading TTS tail.
+    const bool speaker_drained =
+        (this->speaker_ != nullptr) && !this->speaker_->has_buffered_data();
     const bool timed_out =
         (millis() - this->speaker_stop_wait_started_ms_) >= kSpeakerStopTimeoutMs;
-    if (speaker_stopped || timed_out) {
-      if (timed_out && !speaker_stopped) {
+    if (speaker_drained || timed_out) {
+      if (timed_out && !speaker_drained) {
         ESP_LOGW(TAG,
-                 "speaker didn't transition to STOPPED in %u ms — "
+                 "speaker still had buffered data after %u ms — "
                  "proceeding anyway (fallback)",
                  (unsigned) kSpeakerStopTimeoutMs);
       }
