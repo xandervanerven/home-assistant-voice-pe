@@ -133,6 +133,21 @@ ota:
   - platform: esphome
     id: ota_esphome
 
+# va-direct: we removed `api:` (HA no longer talks to this device — audio
+# goes over va_client WS, tools go via the MCP server on the backend), but
+# ESPHome's mDNS only advertises `_esphomelib._tcp` under USE_API. Without
+# that service `esphome run`'s mDNS browse can't find us and prints
+# "no devices matching ...local were discovered" → "no valid options for
+# upload/logging". Advertise the service manually so OTA upload works.
+# Post-upload log streaming over API still won't work (nothing listens on
+# 6053), but `udp_log:` below ships logs to Dozzle on the Pi anyway, and
+# serial is always available as a fallback.
+mdns:
+  services:
+    - service: _esphomelib
+      protocol: _tcp
+      port: 6053
+
 # va-direct: WiFi provisioning blocks moved out of factory.yaml into the main
 # config since we don't use the upstream two-tier factory build.
 improv_serial:
@@ -1926,6 +1941,15 @@ micro_wake_word:
                                       sound_file: "error_cloud_expired"
                                 else:
                                   # Regular wake word: play wake chime, start a new session.
+                                  # Stop the TTS playback chain first. The previous turn may
+                                  # still have downstream ring residual (~600 ms) even after
+                                  # the server said phase=idle — start_session()'s internal
+                                  # send_interrupt() flushes the PSRAM queue, but the leaf's
+                                  # own ring buffers it can't reach. Without this stop the
+                                  # tail of the old reply leaks under the wake chime.
+                                  # No-op when there's nothing playing.
+                                  - speaker.stop:
+                                      id: media_resampling_speaker
                                   - if:
                                       condition:
                                         switch.is_on: wake_sound

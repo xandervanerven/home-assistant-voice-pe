@@ -602,6 +602,32 @@ void VaClient::start_session() {
   // the server until "phase":"idle" comes back (response.done). Without this
   // gate, OpenAI Realtime's server VAD would respond to any speech in the
   // room — wake word would be cosmetic.
+
+  // Belt-and-suspenders barge-in. The yaml wake handler calls send_interrupt()
+  // when it observes voice_assistant_phase == replying, but two windows slip
+  // past that check:
+  //   1) server already sent phase=idle yet PSRAM still has seconds of TTS
+  //      queued (idle_emit_pending_). yaml's voice_assistant_phase has been
+  //      reset to idle and the wake handler takes the "fresh session" path —
+  //      no interrupt — so the new reply overlaps with the tail of the old.
+  //   2) wake fires mid-reply on a long answer where the server is still
+  //      generating tokens; without an interrupt, OpenAI keeps streaming TTS
+  //      we'll never play, burning tokens.
+  // The bridge treats interrupt as cheap when there's nothing to cancel
+  // (response_cancel_not_active is in its benignCodes set), and
+  // input_audio_buffer.clear is safe here because mic frames for the new turn
+  // don't start flowing until after this function returns.
+  const bool residual_reply =
+      this->audio_fill_ > 0 ||
+      this->idle_emit_pending_ ||
+      this->current_phase_ == "replying" ||
+      this->current_phase_ == "thinking";
+  if (residual_reply) {
+    ESP_LOGI(TAG, "start_session: interrupting residual reply (phase=%s, fill=%u)",
+             this->current_phase_.c_str(), (unsigned) this->audio_fill_);
+    this->send_interrupt();
+  }
+
   ESP_LOGI(TAG, "start_session() — streaming on");
   this->streaming_ = true;
   // New wake word starts a fresh session — drop any pending or active
