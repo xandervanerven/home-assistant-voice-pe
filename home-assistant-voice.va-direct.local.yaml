@@ -1792,7 +1792,7 @@ external_components:
       type: git
       url: !secret va_components_repo
       ref: dev
-    components: [va_client, udp_log]
+    components: [va_client]
     refresh: 0s
 
 # va-direct: forward device logs to a UDP sink container on the Pi so they
@@ -1806,14 +1806,11 @@ time:
   - platform: sntp
     id: sntp_time
 
-udp_log:
-  host: va.local
-  port: 5140
-  # DEBUG forwarded for now while we're still ironing things out — bump
-  # back to INFO once the device behaves and wifi-amplified spam stops
-  # paying off.
-  level: DEBUG
-  time_id: sntp_time
+# udp_log removed: it forwarded logs to maxmaxme's Dozzle host (va.local),
+# which doesn't exist on a normal network. With the host unresolved and
+# DEBUG-level forwarding, the send path blocked the main loop and tripped the
+# task watchdog -> boot loop. Re-add (with a host that exists on your LAN) only
+# if you actually run a UDP log sink.
 
 va_client:
   id: va
