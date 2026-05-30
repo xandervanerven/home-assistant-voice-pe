@@ -44,6 +44,20 @@ void VaClient::setup() {
     ESP_LOGCONFIG(TAG, "Allocated %u-byte audio ring buffer in PSRAM", (unsigned) kAudioBufBytes);
   }
 
+  // Allocate the mic pre-roll ring in PSRAM (kPreRollMs of 16 kHz int16 mono).
+  this->preroll_capacity_samples_ = (size_t) kPreRollMs * (kMicSampleRate / 1000);
+  this->preroll_buf_ = static_cast<int16_t *>(
+      heap_caps_malloc(this->preroll_capacity_samples_ * sizeof(int16_t),
+                       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (this->preroll_buf_ == nullptr) {
+    ESP_LOGE(TAG, "Failed to allocate %u-sample mic pre-roll buffer in PSRAM",
+             (unsigned) this->preroll_capacity_samples_);
+    this->preroll_capacity_samples_ = 0;
+  } else {
+    ESP_LOGCONFIG(TAG, "Allocated %u ms mic pre-roll buffer in PSRAM (%u samples)",
+                  (unsigned) kPreRollMs, (unsigned) this->preroll_capacity_samples_);
+  }
+
   // Tell the resampler what format we'll feed it. The resampler converts to
   // its yaml-configured output format (48k 16-bit) before passing to the
   // mixer → i2s leaf. Start the speaker task once so play() calls just push
@@ -455,13 +469,6 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
 void VaClient::on_mic_data_(const std::vector<uint8_t> &samples) {
   if (!this->ws_connected_ || this->ws_handle_ == nullptr)
     return;
-  // Gate streaming on the wake word: if no session is active, drop frames.
-  // Otherwise OpenAI Realtime's server VAD would trigger responses to any
-  // random speech in the room — wake word would become decoration. The
-  // session opens via start_session() (wake-word handler) and closes on
-  // "phase":"idle" coming back from the server (response.done).
-  if (!this->streaming_)
-    return;
   // i2s_mics yields interleaved stereo int32 frames: [L0_low,L0_high, R0_low,R0_high, L1..].
   // Each frame = 8 bytes (2ch × 4 bytes). We want one channel converted to
   // int16 mono. Real audio sits in the high 16 bits (ADC pads up to int32).
@@ -479,13 +486,77 @@ void VaClient::on_mic_data_(const std::vector<uint8_t> &samples) {
     this->mono_buf_[i] = static_cast<int16_t>(s >> 16);
   }
 
+  // Streaming gate. When no session is active we don't forward frames to the
+  // server (otherwise OpenAI's VAD would respond to any room speech — the wake
+  // word would be decoration). But instead of dropping them, retain the most
+  // recent kPreRollMs in a rolling pre-roll ring so start_session() can replay
+  // the first word(s) spoken during the wake-chime + tail-delay window. The
+  // session opens via start_session() (wake handler) and closes on
+  // "phase":"idle" from the server (response.done).
+  if (!this->streaming_) {
+    this->preroll_push_(this->mono_buf_.data(), this->mono_buf_.size());
+    return;
+  }
+
   auto handle = static_cast<esp_websocket_client_handle_t>(this->ws_handle_);
+
+  // First frame of a fresh session: replay the captured pre-roll ahead of live
+  // audio so the utterance onset reaches the server in chronological order.
+  if (this->preroll_flush_pending_) {
+    this->preroll_flush_pending_ = false;
+    this->preroll_flush_();
+  }
+
   // 10ms timeout (~portTICK_PERIOD_MS): if WS task is briefly busy we wait
   // a tick rather than dropping the frame and spamming "Could not lock"
   // errors. If we're swamped, we accept dropping rather than blocking mic.
   esp_websocket_client_send_bin(handle, reinterpret_cast<const char *>(this->mono_buf_.data()),
                                 static_cast<int>(this->mono_buf_.size() * sizeof(int16_t)),
                                 10 / portTICK_PERIOD_MS);
+}
+
+void VaClient::preroll_push_(const int16_t *data, size_t n) {
+  if (this->preroll_buf_ == nullptr || this->preroll_capacity_samples_ == 0)
+    return;
+  const size_t cap = this->preroll_capacity_samples_;
+  for (size_t i = 0; i < n; i++) {
+    this->preroll_buf_[this->preroll_head_] = data[i];
+    if (++this->preroll_head_ >= cap)
+      this->preroll_head_ = 0;
+    if (this->preroll_count_ < cap)
+      this->preroll_count_++;
+  }
+}
+
+void VaClient::preroll_flush_() {
+  if (this->preroll_buf_ == nullptr || this->preroll_count_ == 0 ||
+      this->ws_handle_ == nullptr) {
+    this->preroll_count_ = 0;
+    this->preroll_head_ = 0;
+    return;
+  }
+  auto handle = static_cast<esp_websocket_client_handle_t>(this->ws_handle_);
+  const size_t cap = this->preroll_capacity_samples_;
+  const size_t count = this->preroll_count_;
+  // Oldest valid sample sits `count` positions behind the write head. Send it
+  // oldest-first as up to two contiguous spans of the ring (no copy).
+  const size_t start = (this->preroll_head_ + cap - count) % cap;
+  size_t first = count;
+  if (start + first > cap)
+    first = cap - start;
+  esp_websocket_client_send_bin(handle, reinterpret_cast<const char *>(this->preroll_buf_ + start),
+                                static_cast<int>(first * sizeof(int16_t)),
+                                30 / portTICK_PERIOD_MS);
+  const size_t rem = count - first;
+  if (rem > 0) {
+    esp_websocket_client_send_bin(handle, reinterpret_cast<const char *>(this->preroll_buf_),
+                                  static_cast<int>(rem * sizeof(int16_t)),
+                                  30 / portTICK_PERIOD_MS);
+  }
+  ESP_LOGI(TAG, "flushed mic pre-roll: %u samples (~%u ms)",
+           (unsigned) count, (unsigned)(count / (kMicSampleRate / 1000)));
+  this->preroll_count_ = 0;
+  this->preroll_head_ = 0;
 }
 
 void VaClient::set_phase_(const std::string &phase) {
@@ -651,6 +722,10 @@ void VaClient::start_session() {
     this->send_interrupt();
   }
 
+  // Arm the pre-roll flush so the mic task replays the buffered onset audio
+  // (captured during the chime/tail-delay window) ahead of the first live
+  // frame — recovers the first word(s) that the gate would otherwise drop.
+  this->preroll_flush_pending_ = true;
   ESP_LOGI(TAG, "start_session() — streaming on");
   this->streaming_ = true;
   // New wake word starts a fresh session — drop any pending or active

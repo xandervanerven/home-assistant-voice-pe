@@ -72,6 +72,10 @@ class VaClient : public Component {
   void connect_();
   void schedule_reconnect_();
   void on_mic_data_(const std::vector<uint8_t> &samples);
+  // Mic pre-roll helpers (mic-task only, no lock). push appends to the rolling
+  // ring while the session is closed; flush replays it ahead of live audio.
+  void preroll_push_(const int16_t *data, size_t n);
+  void preroll_flush_();
   void handle_text_(const char *data, size_t len);
   void handle_binary_(const uint8_t *data, size_t len);
   void set_phase_(const std::string &phase);
@@ -116,6 +120,22 @@ class VaClient : public Component {
 
   // Scratch buffers reused on the hot path to avoid per-callback heap allocation.
   std::vector<int16_t> mono_buf_;
+
+  // Mic pre-roll ring (int16 mono @ kMicSampleRate), allocated in PSRAM. We
+  // continuously retain the most recent kPreRollMs of mic audio even while the
+  // session is closed, then flush it ahead of live audio on start_session() so
+  // the first word(s) spoken during the wake-chime + tail-delay window (~900 ms,
+  // otherwise dropped) reach the server. Touched ONLY by the mic task
+  // (on_mic_data_) — no lock needed. preroll_flush_pending_ is set by
+  // start_session() (main loop) and consumed by the mic task: a plain bool like
+  // streaming_.
+  static constexpr uint32_t kMicSampleRate = 16000;  // i2s_mics rate (16 samples/ms)
+  static constexpr uint32_t kPreRollMs = 600;
+  int16_t *preroll_buf_{nullptr};
+  size_t preroll_capacity_samples_{0};
+  size_t preroll_head_{0};   // next write index
+  size_t preroll_count_{0};  // valid samples (<= capacity)
+  bool preroll_flush_pending_{false};
 
   // Streaming gate. True while the mic should be forwarded to the server:
   //   - between wake-word start_session() and "listening"/"thinking"
