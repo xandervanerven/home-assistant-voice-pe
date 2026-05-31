@@ -4,6 +4,7 @@
 #include "esphome/core/log.h"
 #include "esphome/components/audio/audio.h"
 
+#include <algorithm>
 #include <cstring>
 
 #include <esp_websocket_client.h>
