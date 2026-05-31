@@ -198,6 +198,24 @@ class VaClient : public Component {
   // of hearing the tail; higher = safer). Clamped to kFollowupOpenDelayMaxMs.
   uint32_t followup_open_delay_ms_{kFollowupOpenDelayMs};
   static constexpr uint32_t kFollowupOpenDelayMaxMs = 5000;
+  // Playback jitter buffer ("prebuffer"). Before starting/resuming playback we
+  // hold audio in the PSRAM ring until at least this many ms have accumulated
+  // (or a short deadline elapses), so the downstream resampler/mixer/i2s chain
+  // starts with a cushion and a network jitter gap (we see 100-340 ms gaps)
+  // doesn't dry it out → audible crackle. Pushed from the backend `hello`
+  // ("playback_prebuffer_ms":N) so it's tunable without reflashing; clamped to
+  // kPlaybackPrebufferMaxMs. 0 = disabled (play immediately, old behaviour).
+  // Re-armed whenever the ring drains to empty (reply start AND post-underflow).
+  uint32_t playback_prebuffer_ms_{0};
+  static constexpr uint32_t kPlaybackPrebufferMaxMs = 2000;
+  static constexpr uint32_t kPlaybackSampleRate = 24000;  // incoming TTS PCM rate
+  // True while we're accumulating the prebuffer cushion (holding playback).
+  // Touched by handle_binary_ (WS task, arms it) + loop() (main task, releases);
+  // plain flag like streaming_, the tiny race is harmless.
+  bool playback_priming_{false};
+  // millis() when priming started (first byte after the ring was empty); used
+  // for the prime deadline so real-time (non-burst) audio still starts promptly.
+  uint32_t prime_started_ms_{0};
   // Legacy compile-time default, kept for reference. The live value now comes
   // from the backend (followup_ms_); this stays 0 so a device talking to an
   // old backend that doesn't send follow_up_ms keeps the turn-based behaviour.

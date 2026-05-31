@@ -105,6 +105,23 @@ void VaClient::loop() {
     size_t fill = this->audio_fill_;
     portEXIT_CRITICAL(&this->ring_mux_);
     if (fill > 0) {
+      // Jitter buffer priming gate. After the ring was empty (reply start or a
+      // post-underflow gap) hold playback until either the prebuffer cushion has
+      // accumulated (fill >= target) or a deadline elapses (so real-time, non-
+      // burst audio still starts promptly). Holding here lets the downstream
+      // chain start with a cushion so a network gap doesn't dry it out → no
+      // crackle. Skipped entirely when playback_prebuffer_ms_ == 0 (disabled).
+      if (this->playback_priming_) {
+        const size_t target =
+            (size_t) this->playback_prebuffer_ms_ * (kPlaybackSampleRate / 1000) * 2;
+        if (fill >= target ||
+            (millis() - this->prime_started_ms_) >= this->playback_prebuffer_ms_) {
+          this->playback_priming_ = false;
+          ESP_LOGD(TAG, "prebuffer ready (%u bytes) — playback start", (unsigned) fill);
+        } else {
+          return;  // keep accumulating; don't drain (and don't false-flag underrun)
+        }
+      }
       // Detector 3: downstream underrun. If the resampler/mixer/i2s chain
       // ran out of bytes to play while we *still* have PSRAM queued,
       // something hiccupped downstream — the user hears silence or a
@@ -397,6 +414,13 @@ void VaClient::handle_text_(const char *data, size_t len) {
       this->followup_open_delay_ms_ = v;
       ESP_LOGI(TAG, "hello: follow-up mic-open delay = %u ms", (unsigned) v);
     }
+    if (parse_uint_after_key(msg, "\"playback_prebuffer_ms\":", v)) {
+      if (v > kPlaybackPrebufferMaxMs)
+        v = kPlaybackPrebufferMaxMs;
+      this->playback_prebuffer_ms_ = v;
+      ESP_LOGI(TAG, "hello: playback prebuffer (jitter buffer) = %u ms (%s)", (unsigned) v,
+               v == 0 ? "disabled" : "cushion before playback");
+    }
     return;
   }
 
@@ -506,6 +530,7 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
   // to guarantee that ordering — len is at most a few KB per WS frame
   // and PSRAM memcpy is ~10–20 µs, well under any audio deadline.
   portENTER_CRITICAL(&this->ring_mux_);
+  const bool was_empty = (this->audio_fill_ == 0);
   size_t tail = this->audio_tail_;
   size_t first = std::min(len, kAudioBufBytes - tail);
   std::memcpy(this->audio_buf_ + tail, data, first);
@@ -515,6 +540,13 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
   this->audio_tail_ = (tail + len) % kAudioBufBytes;
   this->audio_fill_ += len;
   portEXIT_CRITICAL(&this->ring_mux_);
+  // Jitter buffer: when the ring was empty and audio starts flowing again
+  // (reply start, or after an underflow gap), arm priming so loop() holds
+  // playback until a prebuffer cushion has accumulated. Only when enabled.
+  if (was_empty && this->playback_prebuffer_ms_ > 0 && !this->playback_priming_) {
+    this->prime_started_ms_ = now_ms;
+    this->playback_priming_ = true;
+  }
   // No per-chunk log — fires 50+ times per reply at DEBUG and drowns the
   // log. The throttled drain log in loop() gives enough visibility into
   // queue depth.
@@ -972,6 +1004,8 @@ void VaClient::send_interrupt() {
   // Drop further incoming TTS until the backend confirms the turn boundary —
   // it keeps streaming the rest of the (already-generated) reply otherwise.
   this->suppress_incoming_audio_ = true;
+  // Ring was just flushed; re-arm the jitter buffer fresh for the next reply.
+  this->playback_priming_ = false;
   this->followup_pending_ = false;
   this->waiting_for_speaker_stop_ = false;
   this->request_follow_up_pending_ = false;
