@@ -54,6 +54,9 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Log files (e.g. esp_logs.py / backend_logs.py debugging output)
+*.log
+
 # Unit test / coverage reports
 htmlcov/
 .tox/
