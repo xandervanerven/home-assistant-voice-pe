@@ -1,4 +1,4 @@
-# Home Assistant Voice PE — OpenAI Realtime fork
+# Home Assistant Voice PE — OpenAI Realtime 2 fork
 
 > **Customized fork** of `maxmaxme/home-assistant-voice-pe` (itself a fork of
 > `esphome/home-assistant-voice-pe`). The Voice PE runs as a **thin client**: it
