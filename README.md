@@ -1,5 +1,12 @@
 # Home Assistant Voice PE — OpenAI Realtime 2 fork
 
+> [!IMPORTANT]
+> **This is 1 of 2 repos — you need both halves.** This repo is the **device
+> firmware**; on its own it does nothing. It streams audio to a backend add-on that
+> runs the OpenAI Realtime session and controls Home Assistant. You must set up both:
+> - 🔌 **Device firmware** (this repo) — flashed onto the Voice PE
+> - 🧠 **Backend add-on** → **[xandervanerven/ha-openai-realtime](https://github.com/xandervanerven/ha-openai-realtime)** (runs in Home Assistant)
+
 > **Customized fork** of `maxmaxme/home-assistant-voice-pe` (itself a fork of
 > `esphome/home-assistant-voice-pe`). The Voice PE runs as a **thin client**: it
 > streams microphone audio over a plain WebSocket to a backend add-on, which runs
@@ -13,8 +20,6 @@
 > You don't paste it directly — you adopt it via a tiny per-device stub
 > ([`esphome-builder.dhcp.yaml`](esphome-builder.dhcp.yaml)) that pulls it as a remote package,
 > so updates are **one click** in the ESPHome dashboard (see Setup).
->
-> Companion backend add-on: **[xandervanerven/ha-openai-realtime](https://github.com/xandervanerven/ha-openai-realtime)**.
 
 ## What this fork changes vs. upstream
 
