@@ -1634,25 +1634,29 @@ script:
   # on_phase handler (enable on phase=replying, disable otherwise).
   # Kept for diff readability with upstream; safe to delete once the
   # va-direct yaml is the only one.
-  # Watchdog for va_client follow-up windows: if the user stays silent
-  # during a request_follow_up window, va_client closes the mic at
-  # kRequestFollowUpMs (10 s) but doesn't notify yaml. Without this script
-  # the LED would stay in listening_for_command forever and the `stop`
-  # model would never disarm. mode: restart so a new follow-up cancels
-  # the previous timer.
+  # Single disarm point for the "stop" wake word. Started on EVERY return to idle
+  # (on_phase) and by on_followup_opened (request_follow_up). It waits out the
+  # whole reply tail + follow-up listening window, then disarms "stop" — but only
+  # if no new reply started meanwhile (a new reply calls script.stop on this and
+  # re-arms). mode: restart so each idle / follow-up restarts the timer.
   #
-  # Total wait = kFollowupOpenDelayMs (1500ms drain wait before mic opens)
-  # + kRequestFollowUpMs (10000ms mic-open window) + 500ms buffer.
+  # 12 s comfortably covers both window types: the automatic follow-up
+  # (follow_up_listen_seconds, ~8 s) and a request_follow_up (kRequestFollowUpMs,
+  # ~10 s) plus the mic-open delay + buffer. In the gap between the window closing
+  # and this firing, "stop" stays armed but is a harmless no-op at idle.
   - id: followup_window_watchdog
     mode: restart
     then:
       - delay: 12000ms
-      # If we're still in listening (user never spoke / server never moved
-      # past listening_for_command), the follow-up timed out silently.
-      # Disarm stop and drop the LED back to idle.
+      # Still at rest (idle) or still in the listening window (user never spoke)?
+      # Then the turn + its follow-up are over — disarm stop and settle on idle.
+      # If a new reply started, phase is replying/thinking here, so we leave stop
+      # armed (and this watchdog was also cancelled on "replying").
       - if:
           condition:
-            lambda: 'return id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id};'
+            lambda: |-
+              return id(voice_assistant_phase) == ${voice_assist_idle_phase_id} ||
+                     id(voice_assistant_phase) == ${voice_assist_listening_for_command_phase_id};
           then:
             - micro_wake_word.disable_model: stop
             - lambda: id(voice_assistant_phase) = ${voice_assist_idle_phase_id};
@@ -1933,27 +1937,32 @@ va_client:
           lambda: 'return phase == "idle";'
         then:
           - micro_wake_word.start:
-    # Arm the "stop" wake word for the WHOLE reply, not per phase-transition.
-    # The backend's phase flaps replying<->thinking DURING a single reply (the
-    # device keeps draining TTS through those "thinking" flaps — see the logs:
-    # replying -> thinking 1s in, then idle 12s later). The old
-    # disarm-on-every-non-replying `else` branch therefore switched "stop" OFF
-    # for most of each reply, so the user's "stop" was almost always ignored.
-    # Mirror stock's activate_stop_word_once: ENABLE on the first "replying" and
-    # DISABLE only when the turn fully ends ("idle"); leave listening/thinking in
-    # between untouched so the model stays armed across the flaps. (Detection
-    # over the device's own TTS is still AEC-limited, but at least it's now
-    # actually listening for the whole reply.)
+    # Arm "stop" for the WHOLE reply AND through the follow-up listening window —
+    # not just while the backend says "replying". Two reasons:
+    #  1) The backend bursts the reply; the device keeps playing the audio TAIL
+    #     for a moment AFTER "idle", and the phase flaps replying<->thinking
+    #     mid-reply. So we arm on "replying" and never disarm on those flaps.
+    #  2) After every reply the device opens an automatic follow-up listening
+    #     window (mic on). The user must be able to say "stop" during that window
+    #     too. So we do NOT disarm on "idle" — that used to leave a dead gap over
+    #     the tail + the whole follow-up window (the reported "stop doesn't work
+    #     when it goes back to listening"). The disarm is handed to
+    #     followup_window_watchdog, which fires only once the device has truly
+    #     gone to rest (window expired, no new reply). A new reply cancels that
+    #     watchdog and re-arms. Mirrors stock's "arm while audio plays", extended
+    #     across our follow-up window.
     - if:
         condition:
           lambda: 'return phase == "replying";'
         then:
           - micro_wake_word.enable_model: stop
+          - script.stop: followup_window_watchdog
     - if:
         condition:
           lambda: 'return phase == "idle";'
         then:
-          - micro_wake_word.disable_model: stop
+          - micro_wake_word.enable_model: stop
+          - script.execute: followup_window_watchdog
   on_repeated_failure:
     # Backend has been unreachable for N reconnect attempts in a row.
     # Play the error chime once so the user knows something's wrong —
