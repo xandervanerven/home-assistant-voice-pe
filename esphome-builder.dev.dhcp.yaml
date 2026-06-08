@@ -1,0 +1,30 @@
+# ============================================================================
+# Per-device stub for the OpenAI Realtime Voice PE firmware -- DEV CHANNEL (DHCP).
+#
+# Tracks the repo's `dev` branch (WIP) and talks to the DEV add-on on port 8081.
+# Use this ONLY on your own dev device. For the stable channel, use
+# esphome-builder.dhcp.yaml (which tracks @main + the stable add-on on 8080).
+#
+#   1. Set `name` / `friendly_name`. Keep `name` IDENTICAL to your stable stub --
+#      it's the same physical device; only the channel differs.
+#   2. Put these keys in your ESPHome secrets.yaml (Builder -> Secrets):
+#        wifi_ssid, wifi_password, ota_password, api_key
+#   3. Install once (USB first time, then OTA). Click Update on new dev versions.
+# ============================================================================
+substitutions:
+  name: my-voice-pe                  # SAME name as your stable stub (same device)!
+  friendly_name: Home Assistant Voice (dev)
+  # Secrets -> substitutions (a remote package can't use !secret directly):
+  wifi_ssid: !secret wifi_ssid
+  wifi_password: !secret wifi_password
+  ota_password: !secret ota_password
+  api_key: !secret api_key
+  # DEV channel: talk to the dev add-on (port 8081), not stable (8080).
+  va_url: "ws://homeassistant.local:8081/"
+
+packages:
+  realtime: github://xandervanerven/home-assistant-voice-pe/home-assistant-voice.realtime.yaml@dev
+
+dashboard_import:
+  package_import_url: github://xandervanerven/home-assistant-voice-pe/home-assistant-voice.realtime.yaml@dev
+  import_full_config: false
