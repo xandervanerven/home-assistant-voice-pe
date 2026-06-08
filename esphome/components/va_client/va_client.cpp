@@ -665,7 +665,7 @@ void VaClient::set_phase_(const std::string &phase) {
   // changed since the last emission.
   const std::string prev_phase = this->current_phase_;
   this->current_phase_ = phase;
-  ESP_LOGD(TAG, "Phase -> %s", phase.c_str());
+  ESP_LOGD(TAG, "Phase -> %s (was %s)", phase.c_str(), prev_phase.c_str());
 
   // Lift the post-"stop" incoming-audio suppression once the backend confirms a
   // turn boundary: "idle" (the cancelled reply truly ended) or "listening" (a
@@ -1015,7 +1015,9 @@ void VaClient::send_interrupt() {
   // happen under the mux: the WS task could be mid-write and seeing
   // head=tail=fill=0 partway through would let it write into a "freshly
   // empty" buffer the user just barge-cancelled.
+  size_t flushed_bytes;
   portENTER_CRITICAL(&this->ring_mux_);
+  flushed_bytes = this->audio_fill_;
   this->audio_head_ = 0;
   this->audio_tail_ = 0;
   this->audio_fill_ = 0;
@@ -1040,7 +1042,12 @@ void VaClient::send_interrupt() {
   // mic window — the user said "stop", not "wait for me to keep talking".
   this->suppress_followup_ = true;
   this->cancel_timeout("va_followup_open");
-  ESP_LOGI(TAG, "send_interrupt — WS msg sent, queue flushed");
+  // Report how much already-buffered TTS we just dropped — i.e. how much of the
+  // (burst-complete) reply the user did NOT hear. If stale audio ever bleeds into
+  // the next turn, this number + the next "Phase ->" tell the story.
+  ESP_LOGI(TAG, "send_interrupt — WS msg sent; flushed %u bytes (~%u ms) of queued TTS, suppressing further audio until next turn",
+           (unsigned) flushed_bytes,
+           (unsigned) (flushed_bytes / (kPlaybackSampleRate / 1000 * 2)));
 }
 
 }  // namespace va_client
