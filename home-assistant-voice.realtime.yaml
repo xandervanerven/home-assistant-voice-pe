@@ -1133,6 +1133,15 @@ light:
     icon: "mdi:circle-outline"
     default_transition_length: 0ms
     restore_mode: RESTORE_DEFAULT_OFF
+    # Re-render the device LEDs when this entity is toggled from HA: the idle
+    # "Active Pulse" is gated on this light's state, and without a refresh the
+    # running effect would keep overwriting the strip until the next phase
+    # change. on_turn_on/off only fire on real transitions, so the re-assert
+    # inside control_leds (turn_on while already on) can't loop back here.
+    on_turn_on:
+      - script.execute: control_leds
+    on_turn_off:
+      - script.execute: control_leds
     initial_state:
       color_mode: rgb
       brightness: 66%
@@ -1320,11 +1329,18 @@ script:
     then:
       # va-direct: when the va_client WebSocket is connected, show a gentle blue
       # breathing pulse at idle so there's a visible "ready" state (as the user
-      # wants, like the reference firmware). When the WS is down, keep the stock
-      # behaviour: ring off unless the user manually turned on the led_ring light.
+      # wants, like the reference firmware) — but ONLY while the user-facing
+      # "LED Ring" light entity is ON. The pulse used to ignore that entity's
+      # on/off state (it only read its brightness), and since the effect
+      # re-renders every 50 ms it instantly overwrote any turn-off coming from
+      # HA — the HA switch appeared broken. Entity off = device dark at rest,
+      # like stock. When the WS is down, keep the stock behaviour too: ring off
+      # unless the user manually turned on the led_ring light.
       - if:
           condition:
-            lambda: 'return id(va)->is_connected();'
+            and:
+              - lambda: 'return id(va)->is_connected();'
+              - light.is_on: led_ring
           then:
             - light.turn_on:
                 id: voice_assistant_leds
