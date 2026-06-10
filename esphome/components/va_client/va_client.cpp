@@ -586,10 +586,15 @@ void VaClient::handle_binary_(const uint8_t *data, size_t len) {
   this->audio_tail_ = (tail + len) % kAudioBufBytes;
   this->audio_fill_ += len;
   portEXIT_CRITICAL(&this->ring_mux_);
-  // Jitter buffer: when the ring was empty and audio starts flowing again
-  // (reply start, or after an underflow gap), arm priming so loop() holds
-  // playback until a prebuffer cushion has accumulated. Only when enabled.
-  if (was_empty && this->playback_prebuffer_ms_ > 0 && !this->playback_priming_) {
+  // Jitter buffer: arm priming only when the ring was empty AND the downstream
+  // chain is dry — i.e. a true reply start or a real underflow. Mid-reply the
+  // ring routinely flips empty (loop() drains each WS clump on arrival) while
+  // the downstream chain still holds ~600 ms of audio; re-arming there did
+  // nothing but spam "prebuffer ready" every ~50 ms and could hold a small
+  // trailing chunk for the full prebuffer deadline. has_buffered_data() is a
+  // counter read, safe enough from the WS task. Only when enabled.
+  if (was_empty && this->playback_prebuffer_ms_ > 0 && !this->playback_priming_ &&
+      !this->speaker_->has_buffered_data()) {
     this->prime_started_ms_ = now_ms;
     this->playback_priming_ = true;
   }
@@ -750,6 +755,11 @@ void VaClient::set_phase_(const std::string &phase) {
     this->followup_armed_ = false;
     this->idle_emit_pending_ = false;  // new turn began, drop any held idle
   } else if (phase == "idle") {
+    // Turn boundary: reset the WS-gap reference so the silence between THIS
+    // reply and the NEXT turn's reply (~7 s across a follow-up exchange, where
+    // start_session() — the other reset point — is never called) isn't logged
+    // as a bogus "ws audio gap". Only intra-reply gaps are real signal.
+    this->last_binary_ms_ = 0;
     // Only open a follow-up window if we just finished a real turn —
     // i.e. the previous phase was thinking or replying. Otherwise we'd
     // open the window for every spurious idle (initial WS hello, post-
