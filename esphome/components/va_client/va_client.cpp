@@ -715,13 +715,21 @@ void VaClient::set_phase_(const std::string &phase) {
   this->current_phase_.store(static_cast<uint8_t>(phase_from_string_(phase)));
   ESP_LOGD(TAG, "Phase -> %s (was %s)", phase.c_str(), phase_name_(prev));
 
-  // Lift the post-"stop" incoming-audio suppression once the backend confirms a
-  // turn boundary: "idle" (the cancelled reply truly ended) or "listening" (a
-  // fresh turn's audio is now legitimate). We deliberately do NOT clear on
+  // Lift the post-"stop" incoming-audio suppression ONLY on "listening" — a
+  // genuine fresh user turn whose reply is legitimate. We deliberately do NOT
+  // lift on "idle": the backend keeps streaming the cancelled reply's audio in
+  // real-time (OpenAI generated it faster than playback; a `response.cancel`
+  // after the response already finished is a no-op), so it can drain for many
+  // seconds AFTER the stop. An "idle" can arrive mid-drain — notably the
+  // backend's thinking-watchdog force-idle — and lifting suppression there
+  // un-mutes the still-arriving tail, which then plays as an "answer out of
+  // nowhere" (observed live 2026-06-13 10:11). A real next reply is always
+  // preceded by "listening" (the user speaks), so that stays the only safe
+  // gate; until then the tail keeps being dropped. We also do NOT clear on
   // "thinking"/"replying" — those can still belong to the reply we cancelled.
-  if (this->suppress_incoming_audio_ && (phase == "idle" || phase == "listening")) {
+  if (this->suppress_incoming_audio_ && phase == "listening") {
     this->suppress_incoming_audio_ = false;
-    ESP_LOGI(TAG, "incoming-audio suppression lifted on phase=%s", phase.c_str());
+    ESP_LOGI(TAG, "incoming-audio suppression lifted on phase=listening");
   }
 
   // Streaming gate state machine:
