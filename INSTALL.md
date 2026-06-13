@@ -86,6 +86,7 @@ known-good starting point — you can fine-tune later:
 | `transcription_model` | `gpt-4o-transcribe` |
 | `follow_up_listen_seconds` | `8` |
 | `follow_up_open_delay_ms` | `700` |
+| `wake_open_delay_ms` | `700` |
 | `playback_prebuffer_ms` | `150` |
 | `max_context_messages` | `12` |
 | `mcp_tool_allowlist` | **blank** (use all of the official server's tools — it's already a small set) |

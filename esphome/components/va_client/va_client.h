@@ -51,6 +51,13 @@ class VaClient : public Component {
 
   bool is_connected() const { return ws_connected_; }
 
+  // Delay (ms) the yaml wake handler waits after the wake chime before opening
+  // the mic, so the chime's i2s/DAC tail can't leak into the fresh mic and
+  // become a ghost turn. Pushed from the backend `hello` (wake_open_delay_ms);
+  // the wake automation reads it via `- delay: !lambda`. Defaults to the safe
+  // kWakeOpenDelayMs so an old backend (no key) still behaves sensibly.
+  uint32_t get_wake_open_delay_ms() const { return wake_open_delay_ms_; }
+
   void setup() override;
   void loop() override;
   float get_setup_priority() const override { return setup_priority::AFTER_WIFI; }
@@ -214,6 +221,14 @@ class VaClient : public Component {
   // of hearing the tail; higher = safer). Clamped to kFollowupOpenDelayMaxMs.
   uint32_t followup_open_delay_ms_{kFollowupOpenDelayMs};
   static constexpr uint32_t kFollowupOpenDelayMaxMs = 5000;
+  // Wake-chime echo guard: delay (ms) the yaml wake handler waits after the
+  // wake chime before opening the mic. The wake-path twin of
+  // followup_open_delay_ms_ (the follow-up boundary). Pushed from the backend
+  // `hello` ("wake_open_delay_ms":N); read by yaml via get_wake_open_delay_ms().
+  // Default 700 matches the backend default so a device on an old backend (no
+  // key in hello) still gets the safe value rather than the old hardcoded 400.
+  static constexpr uint32_t kWakeOpenDelayMs = 700;
+  uint32_t wake_open_delay_ms_{kWakeOpenDelayMs};
   // Playback jitter buffer ("prebuffer"). Before starting/resuming playback we
   // hold audio in the PSRAM ring until at least this many ms have accumulated
   // (or a short deadline elapses), so the downstream resampler/mixer/i2s chain

@@ -2161,7 +2161,12 @@ micro_wake_word:
                                   # Downstream ring tail — keep the chime
                                   # off the mic so XMOS AEC doesn't leak it
                                   # back as "Ok, nabu" into the new turn.
-                                  - delay: 400ms
+                                  # Tunable from the add-on (wake_open_delay_ms,
+                                  # default 700) via the hello handshake — the
+                                  # wake-path twin of follow_up_open_delay_ms.
+                                  # Was a hardcoded 400 ms; too short, the chime
+                                  # tail leaked in as a ghost turn (2026-06-12).
+                                  - delay: !lambda "return id(va)->get_wake_open_delay_ms();"
                             # Open the mic locally. Used to rely on the
                             # bridge echoing phase=listening after interrupt;
                             # bridge no longer does that (it would also pop
@@ -2219,13 +2224,13 @@ micro_wake_word:
                                                   id: external_media_player
                                             timeout: 2s
                                         # Downstream i2s_audio_speaker ring buffer is
-                                        # still draining. 600 ms was conservative —
-                                        # 400 ms covers the typical tail without
-                                        # noticeable risk of the chime leaking into
-                                        # the mic (XMOS AEC catches the residual).
-                                        # Saves ~200 ms of "dead corridor" where the
-                                        # user can't yet be heard.
-                                        - delay: 400ms
+                                        # still draining. Tunable from the add-on
+                                        # (wake_open_delay_ms, default 700) via the
+                                        # hello handshake — the wake-path twin of
+                                        # follow_up_open_delay_ms. Was a hardcoded
+                                        # 400 ms, which let the chime tail leak into
+                                        # the fresh mic as a ghost turn (2026-06-12).
+                                        - delay: !lambda "return id(va)->get_wake_open_delay_ms();"
                                   - lambda: 'id(va)->start_session();'
                                   # Show "waiting for command" (blue spin) immediately on wake,
                                   # before the server VAD detects actual speech. va_client's

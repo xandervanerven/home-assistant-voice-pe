@@ -456,6 +456,12 @@ void VaClient::handle_text_(const char *data, size_t len) {
       this->followup_open_delay_ms_ = v;
       ESP_LOGI(TAG, "hello: follow-up mic-open delay = %u ms", (unsigned) v);
     }
+    if (parse_uint_after_key(msg, "\"wake_open_delay_ms\":", v)) {
+      if (v > kFollowupOpenDelayMaxMs)  // reuse the same 5 s ceiling
+        v = kFollowupOpenDelayMaxMs;
+      this->wake_open_delay_ms_ = v;
+      ESP_LOGI(TAG, "hello: wake mic-open delay = %u ms", (unsigned) v);
+    }
     if (parse_uint_after_key(msg, "\"playback_prebuffer_ms\":", v)) {
       if (v > kPlaybackPrebufferMaxMs)
         v = kPlaybackPrebufferMaxMs;
