@@ -1047,10 +1047,28 @@ void VaClient::open_followup_window_(uint32_t duration_ms) {
       if (this->streaming_) {
         ESP_LOGI(TAG, "follow-up window expired — mic streaming off");
         this->streaming_ = false;
+        this->send_mic_flush_();        // drop any uncommitted partial utterance
         this->fire_phase_led_("idle");  // no answer came; back to idle
       }
     });
   });
+}
+
+void VaClient::send_mic_flush_() {
+  // The mic gate just closed mid-stream because a follow-up window timed out.
+  // If the user had started (but not finished) speaking, that audio sits
+  // UNCOMMITTED in OpenAI's input_audio_buffer; left there, a later wake's
+  // audio "completes" it and the model answers a stale half-sentence. Drop it
+  // NOW, at the cut-off, so no reactive clear-on-wake is needed (that disturbed
+  // the server VAD and caused garbage commits). This timer only fires when the
+  // user did NOT trigger speech — `listening` cancels va_followup — so it can
+  // never drop a valid command. Cheap no-op when the buffer was empty.
+  if (this->ws_connected_ && this->ws_handle_ != nullptr) {
+    const char msg[] = "{\"type\":\"flush\"}";
+    auto handle = static_cast<esp_websocket_client_handle_t>(this->ws_handle_);
+    esp_websocket_client_send_text(handle, msg, sizeof(msg) - 1, portMAX_DELAY);
+    ESP_LOGI(TAG, "follow-up window closed — sent flush (drop uncommitted mic audio)");
+  }
 }
 
 void VaClient::fire_phase_led_(const std::string &phase) {
@@ -1088,6 +1106,7 @@ void VaClient::commit_followup_mic() {
     if (this->streaming_) {
       ESP_LOGI(TAG, "follow-up window expired — mic streaming off");
       this->streaming_ = false;
+      this->send_mic_flush_();  // drop any uncommitted partial utterance
     }
   });
 }

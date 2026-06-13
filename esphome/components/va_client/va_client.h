@@ -79,6 +79,13 @@ class VaClient : public Component {
   void connect_();
   void schedule_reconnect_();
   void on_mic_data_(const std::vector<uint8_t> &samples);
+  // Tell the backend to drop any uncommitted mic audio NOW. Sent when the mic
+  // gate closes mid-stream by TIMER (a follow-up window expiring) — a partial
+  // utterance left in OpenAI's input buffer would otherwise be "completed" by a
+  // later wake and answered as a stale half-sentence. Clearing at the cut-off
+  // source means no reactive clear-on-wake is needed (that one disturbed the
+  // server VAD and caused spurious garbage commits). No-op if nothing buffered.
+  void send_mic_flush_();
   // Mic pre-roll helper (mic-task only, no lock). push appends to the rolling
   // ring while the session is closed; the ring is DISCARDED (not replayed) on
   // session open — see preroll_discard_pending_.
